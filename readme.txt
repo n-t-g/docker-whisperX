@@ -14,3 +14,8 @@ pip install uvicorn fastapi python-multipart
 
 python -m whisperx.transcribe_fastapi --model tiny --output_format txt --output_dir out/  --diarize  ../../audio_files/sample.m4a ../../audio_files/sample.m4a
 
+
+
+python -m whisperx.transcribe_fastapi --model tiny --output_format txt --output_dir out/  --diarize  --daemon 
+curl -X POST "http://localhost:8000/transcribe?filename=../../audio_files/sample.m4a&mem_verbose=true"
+

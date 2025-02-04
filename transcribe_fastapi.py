@@ -1,14 +1,11 @@
 import argparse
 import gc
 import os
+import io
 import warnings
-import asyncio
 
 import numpy as np
 import torch
-
-from fastapi import FastAPI, HTTPException, Query
-from starlette.concurrency import run_in_threadpool
 
 from .alignment import align, load_align_model
 from .asr import load_model
@@ -28,14 +25,6 @@ from .utils import (
 def load_arguments():
     # fmt: off
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-
-    # New daemon and server parameters.
-    parser.add_argument("--daemon", action="store_true",
-                        help="Run as a daemon with FastAPI server")
-    parser.add_argument("--host", type=str, default="0.0.0.0",
-                        help="Host for the FastAPI server")
-    parser.add_argument("--port", type=int, default=8000,
-                        help="Port for the FastAPI server")
 
     # audio file(s) to transcribe, required, but only if not running as a daemon.
     parser.add_argument("audio", nargs="*", default=[], help="audio file(s) to transcribe")
@@ -141,6 +130,14 @@ def load_arguments():
                         help="Hugging Face Access Token to access PyAnnote gated models")
     parser.add_argument("--print_progress", type=str2bool, default=False,
                         help="if True, progress will be printed in transcribe() and align() methods.")
+
+    # New daemon and server parameters.
+    parser.add_argument("--daemon", action="store_true",
+                        help="Run as a daemon with FastAPI server")
+    parser.add_argument("--host", type=str, default="0.0.0.0",
+                        help="Host for the FastAPI server")
+    parser.add_argument("--port", type=int, default=8000,
+                        help="Port for the FastAPI server")
     # fmt: on
 
     # If not running as a daemon, require at least one audio file.
@@ -286,7 +283,7 @@ def load_pipelines(args):
     return pipelines
 
 
-def process_file(audio_path: str, args, pipelines, mem_verbose=False):
+def process_file(audio_path: str, args, pipelines, mem_verbose=False, return_result=False):
     """
     Process each audio file sequentially: perform transcription,
     then (if enabled) alignment, then (if enabled) diarization, and finally write output.
@@ -341,10 +338,19 @@ def process_file(audio_path: str, args, pipelines, mem_verbose=False):
                                                 max_speakers=config["max_speakers"])
         result = assign_word_speakers(diarize_segments, result)
 
-    # Write output.
+    # Set the language field (for consistency in the output).
     result["language"] = config["align_language"]
-    writer(result, audio_path, writer_args)
 
+    # Now, use the writer:
+    if return_result:
+        # Use an in-memory stream to capture the writer's output.
+        out_stream = io.StringIO()
+        writer.write_result(result, file=out_stream, options=writer_args)
+        formatted = out_stream.getvalue()
+    else:
+        # In CLI mode, simply write the output.
+        writer(result, audio_path, writer_args)
+    
     # Clean up after processing this file.
     gc.collect()
     torch.cuda.empty_cache()
@@ -354,16 +360,17 @@ def process_file(audio_path: str, args, pipelines, mem_verbose=False):
         reserved = torch.cuda.memory_reserved() / (1024 ** 2)
         print(f"Memory diagnostics after {audio_path}: allocated {allocated:.1f} MB, reserved {reserved:.1f} MB.")
 
+    # In CLI mode, write output to file; in daemon mode, return the final result.
+    if return_result:
+        return formatted
 
 def process_files(args, pipelines, mem_verbose=False):
     """
-    Process all audio files sequentially by calling process_file on each one.
+    Process all audio files sequentially by calling process_file on each one (CLI mode).
     """
     for audio_path in args["audio"]:
-        process_file(audio_path, args, pipelines, mem_verbose)
+        process_file(audio_path, args, pipelines, mem_verbose, return_result=False)
 
-
-            
 def clean_pipelines(pipelines, mem_verbose=False):
     """
     Perform final cleanup of the pipelines, deleting model references
@@ -381,6 +388,10 @@ def clean_pipelines(pipelines, mem_verbose=False):
 
 
 # ---------------- FastAPI Section ----------------
+
+from fastapi import FastAPI, HTTPException, Query
+from starlette.concurrency import run_in_threadpool
+import asyncio
 
 app = FastAPI(title="WhisperX Transcription Service")
 
@@ -402,14 +413,15 @@ async def transcribe_endpoint(
     """
     RESTful endpoint to process a single audio file.
     Only one such call is allowed at a time to protect GPU resources.
+    Instead of writing the output to a file, the final result is returned.
     """
     async with processing_lock:
         try:
             # Run the synchronous process_file() in a thread pool.
-            await run_in_threadpool(process_file, filename, global_args, global_pipelines, mem_verbose)
+            result = await run_in_threadpool(process_file, filename, global_args, global_pipelines, mem_verbose, True)
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
-    return {"status": "completed", "filename": filename}
+    return {"status": "completed", "filename": filename, "result": result}
 
 
 @app.on_event("shutdown")
@@ -420,17 +432,17 @@ async def shutdown_event():
 # ---------------- CLI Entrypoint ----------------
 
 def cli(args):
-    # First, load all pipelines (ASR, align, diarization) based on the CLI arguments.
+    # Load pipelines (ASR, alignment, diarization) based on CLI arguments.
     pipelines = load_pipelines(args)
-    # Process files sequentially. Set mem_verbose=True to see CUDA memory diagnostics.
+    # Process files sequentially (CLI mode writes output to file).
     process_files(args, pipelines, mem_verbose=False)
-    # Clean up after processing all files.
+    # Final cleanup.
     clean_pipelines(pipelines, mem_verbose=False)
 
 
 if __name__ == "__main__":
     args = load_arguments()
-    if args["daemon"]:
+    if args.get("daemon", False):
         # If running as a daemon, start the FastAPI server.
         host = args.pop("host")
         port = args.pop("port")
