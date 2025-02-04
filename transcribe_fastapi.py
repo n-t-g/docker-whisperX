@@ -28,7 +28,18 @@ from .utils import (
 def load_arguments():
     # fmt: off
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("audio", nargs="+", type=str, help="audio file(s) to transcribe")
+
+    # New daemon and server parameters.
+    parser.add_argument("--daemon", action="store_true",
+                        help="Run as a daemon with FastAPI server")
+    parser.add_argument("--host", type=str, default="0.0.0.0",
+                        help="Host for the FastAPI server")
+    parser.add_argument("--port", type=int, default=8000,
+                        help="Port for the FastAPI server")
+
+    # audio file(s) to transcribe, required, but only if not running as a daemon.
+    parser.add_argument("audio", nargs="*", default=[], help="audio file(s) to transcribe")
+
     parser.add_argument("--model", default="small", help="name of the Whisper model to use")
     parser.add_argument("--model_cache_only", type=str2bool, default=False,
                         help="If True, will not attempt to download models, instead using cached models from --model_dir")
@@ -132,7 +143,12 @@ def load_arguments():
                         help="if True, progress will be printed in transcribe() and align() methods.")
     # fmt: on
 
-    return vars(parser.parse_args())
+    # If not running as a daemon, require at least one audio file.
+    args = vars(parser.parse_args())
+    if not args["daemon"] and not args["audio"]:
+        parser.error("At least one audio file must be provided.")
+
+    return args
 
 
 def load_pipelines(args):
@@ -403,8 +419,7 @@ async def shutdown_event():
 
 # ---------------- CLI Entrypoint ----------------
 
-def cli():
-    args = load_arguments()
+def cli(args):
     # First, load all pipelines (ASR, align, diarization) based on the CLI arguments.
     pipelines = load_pipelines(args)
     # Process files sequentially. Set mem_verbose=True to see CUDA memory diagnostics.
@@ -414,5 +429,13 @@ def cli():
 
 
 if __name__ == "__main__":
-    # When run as a script, run the CLI version.
-    cli()
+    args = load_arguments()
+    if args["daemon"]:
+        # If running as a daemon, start the FastAPI server.
+        host = args.pop("host")
+        port = args.pop("port")
+        import uvicorn
+        uvicorn.run(app, host=host, port=port)
+    else:
+        # When run as a script, run the CLI version.
+        cli(args)
