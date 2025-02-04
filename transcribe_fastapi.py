@@ -2,9 +2,13 @@ import argparse
 import gc
 import os
 import warnings
+import asyncio
 
 import numpy as np
 import torch
+
+from fastapi import FastAPI, HTTPException, Query
+from starlette.concurrency import run_in_threadpool
 
 from .alignment import align, load_align_model
 from .asr import load_model
@@ -360,6 +364,45 @@ def clean_pipelines(pipelines, mem_verbose=False):
         print(f"Final cleanup: allocated {allocated:.1f} MB, reserved {reserved:.1f} MB.")
 
 
+# ---------------- FastAPI Section ----------------
+
+app = FastAPI(title="WhisperX Transcription Service")
+
+# Global asynchronous lock to allow only one transcription request at a time.
+processing_lock = asyncio.Lock()
+
+# Load pipelines once at startup.
+# Here we load arguments from the command line. In a production service,
+# you might instead load these from environment variables or a config file.
+global_args = load_arguments()
+global_pipelines = load_pipelines(global_args)
+
+
+@app.post("/transcribe")
+async def transcribe_endpoint(
+    filename: str = Query(..., description="Path to the audio file to transcribe"),
+    mem_verbose: bool = Query(False, description="Enable memory diagnostics")
+):
+    """
+    RESTful endpoint to process a single audio file.
+    Only one such call is allowed at a time to protect GPU resources.
+    """
+    async with processing_lock:
+        try:
+            # Run the synchronous process_file() in a thread pool.
+            await run_in_threadpool(process_file, filename, global_args, global_pipelines, mem_verbose)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+    return {"status": "completed", "filename": filename}
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    clean_pipelines(global_pipelines, mem_verbose=False)
+
+
+# ---------------- CLI Entrypoint ----------------
+
 def cli():
     args = load_arguments()
     # First, load all pipelines (ASR, align, diarization) based on the CLI arguments.
@@ -371,4 +414,5 @@ def cli():
 
 
 if __name__ == "__main__":
+    # When run as a script, run the CLI version.
     cli()
