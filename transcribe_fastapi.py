@@ -136,7 +136,7 @@ def load_pipelines(args):
     Load and return all pipelines (models) based on the CLI arguments.
     This includes the ASR model, the alignment model (if enabled), and the diarization pipeline (if enabled).
     """
-    # Use non-destructive lookups (do not pop) so that later processing can still use the remaining arguments.
+    # Build a configuration dictionary from args.
     config = {}
     config["model_name"] = args["model"]
     config["batch_size"] = args["batch_size"]
@@ -266,10 +266,12 @@ def load_pipelines(args):
     return pipelines
 
 
-def process_files(args, pipelines):
+def process_files(args, pipelines, mem_verbose=False):
     """
-    Process each audio file in args sequentially: perform transcription,
-    then (if enabled) alignment, then (if enabled) diarization, and finally write the output.
+    Process each audio file sequentially: perform transcription,
+    then (if enabled) alignment, then (if enabled) diarization, and finally write output.
+    
+    If mem_verbose is True, print CUDA memory diagnostics after each file is processed.
     """
     config = pipelines["config"]
     writer = get_writer(args["output_format"], args["output_dir"])
@@ -328,17 +330,41 @@ def process_files(args, pipelines):
         result["language"] = config["align_language"]
         writer(result, audio_path, writer_args)
 
-        # Optionally clear GPU caches after processing each file.
+        # Clean up after each file.
         gc.collect()
         torch.cuda.empty_cache()
+
+        # Optionally print memory diagnostics.
+        if mem_verbose and torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated() / (1024 ** 2)
+            reserved = torch.cuda.memory_reserved() / (1024 ** 2)
+            print(f"Memory diagnostics after {audio_path}: allocated {allocated:.1f} MB, reserved {reserved:.1f} MB.")
+
+            
+def clean_pipelines(pipelines, mem_verbose=False):
+    """
+    Perform final cleanup of the pipelines, deleting model references
+    and clearing CUDA cache.
+    """
+    # Remove all references to loaded pipelines.
+    for key in list(pipelines.keys()):
+        del pipelines[key]
+    gc.collect()
+    torch.cuda.empty_cache()
+    if mem_verbose and torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / (1024 ** 2)
+        reserved = torch.cuda.memory_reserved() / (1024 ** 2)
+        print(f"Final cleanup: allocated {allocated:.1f} MB, reserved {reserved:.1f} MB.")
 
 
 def cli():
     args = load_arguments()
     # First, load all pipelines (ASR, align, diarization) based on the CLI arguments.
     pipelines = load_pipelines(args)
-    # Then, process all audio files and write outputs.
-    process_files(args, pipelines)
+    # Process files sequentially. Set mem_verbose=True to see CUDA memory diagnostics.
+    process_files(args, pipelines, mem_verbose=False)
+    # Clean up after processing all files.
+    clean_pipelines(pipelines, mem_verbose=False)
 
 
 if __name__ == "__main__":
