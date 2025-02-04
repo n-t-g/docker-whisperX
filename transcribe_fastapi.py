@@ -266,7 +266,7 @@ def load_pipelines(args):
     return pipelines
 
 
-def process_files(args, pipelines, mem_verbose=False):
+def process_file(audio_path: str, args, pipelines, mem_verbose=False):
     """
     Process each audio file sequentially: perform transcription,
     then (if enabled) alignment, then (if enabled) diarization, and finally write output.
@@ -279,66 +279,69 @@ def process_files(args, pipelines, mem_verbose=False):
     word_options = ["highlight_words", "max_line_count", "max_line_width"]
     writer_args = {key: args[key] for key in word_options if key in args}
 
-    # Process each file one-by-one.
-    for audio_path in args["audio"]:
-        print(">> Processing file:", audio_path)
-        # Load the audio.
-        audio = load_audio(audio_path)
+    print(">> Processing file:", audio_path)
+    audio = load_audio(audio_path)
 
-        # Transcription.
-        print(">> Performing transcription on", audio_path)
-        result: TranscriptionResult = pipelines["asr"].transcribe(
-            audio,
-            batch_size=config["batch_size"],
-            chunk_size=config["chunk_size"],
-            print_progress=args["print_progress"],
-            verbose=config["verbose"],
-        )
+    # Transcription.
+    print(">> Performing transcription on", audio_path)
+    result: TranscriptionResult = pipelines["asr"].transcribe(
+        audio,
+        batch_size=config["batch_size"],
+        chunk_size=config["chunk_size"],
+        print_progress=args["print_progress"],
+        verbose=config["verbose"],
+    )
 
-        # Alignment (if enabled).
-        if not config["no_align"]:
-            # For alignment, if there is more than one file you may want to load audio freshly;
-            # here, we simply reuse the loaded audio.
-            if pipelines["align"] is not None and len(result["segments"]) > 0:
-                # Check if the language detected is different from the alignment model language.
-                if result.get("language", "en") != pipelines["align_metadata"]["language"]:
-                    print(f"New language found ({result['language']}); reloading alignment model...")
-                    pipelines["align"], pipelines["align_metadata"] = load_align_model(
-                        result["language"], config["device"]
-                    )
-                print(">> Performing alignment on", audio_path)
-                result: AlignedTranscriptionResult = align(
-                    result["segments"],
-                    pipelines["align"],
-                    pipelines["align_metadata"],
-                    audio,
-                    config["device"],
-                    interpolate_method=config["interpolate_method"],
-                    return_char_alignments=config["return_char_alignments"],
-                    print_progress=args["print_progress"],
+    # Alignment.
+    if not config["no_align"]:
+        if pipelines["align"] is not None and len(result["segments"]) > 0:
+            # Check if the language detected is different from the alignment model language.
+            if result.get("language", "en") != pipelines["align_metadata"]["language"]:
+                print(f"New language found ({result['language']}); reloading alignment model...")
+                pipelines["align"], pipelines["align_metadata"] = load_align_model(
+                    result["language"], config["device"]
                 )
+            print(">> Performing alignment on", audio_path)
+            result: AlignedTranscriptionResult = align(
+                result["segments"],
+                pipelines["align"],
+                pipelines["align_metadata"],
+                audio,
+                config["device"],
+                interpolate_method=config["interpolate_method"],
+                return_char_alignments=config["return_char_alignments"],
+                print_progress=args["print_progress"],
+            )
 
-        # Diarization (if enabled).
-        if config["diarize"] and pipelines["diarize"] is not None:
-            print(">> Performing diarization on", audio_path)
-            diarize_segments = pipelines["diarize"](audio_path, 
-                                                    min_speakers=config["min_speakers"],
-                                                    max_speakers=config["max_speakers"])
-            result = assign_word_speakers(diarize_segments, result)
+    # Diarization.
+    if config["diarize"] and pipelines["diarize"] is not None:
+        print(">> Performing diarization on", audio_path)
+        diarize_segments = pipelines["diarize"](audio_path, 
+                                                min_speakers=config["min_speakers"],
+                                                max_speakers=config["max_speakers"])
+        result = assign_word_speakers(diarize_segments, result)
 
-        # Write output file.
-        result["language"] = config["align_language"]
-        writer(result, audio_path, writer_args)
+    # Write output.
+    result["language"] = config["align_language"]
+    writer(result, audio_path, writer_args)
 
-        # Clean up after each file.
-        gc.collect()
-        torch.cuda.empty_cache()
+    # Clean up after processing this file.
+    gc.collect()
+    torch.cuda.empty_cache()
 
-        # Optionally print memory diagnostics.
-        if mem_verbose and torch.cuda.is_available():
-            allocated = torch.cuda.memory_allocated() / (1024 ** 2)
-            reserved = torch.cuda.memory_reserved() / (1024 ** 2)
-            print(f"Memory diagnostics after {audio_path}: allocated {allocated:.1f} MB, reserved {reserved:.1f} MB.")
+    if mem_verbose and torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / (1024 ** 2)
+        reserved = torch.cuda.memory_reserved() / (1024 ** 2)
+        print(f"Memory diagnostics after {audio_path}: allocated {allocated:.1f} MB, reserved {reserved:.1f} MB.")
+
+
+def process_files(args, pipelines, mem_verbose=False):
+    """
+    Process all audio files sequentially by calling process_file on each one.
+    """
+    for audio_path in args["audio"]:
+        process_file(audio_path, args, pipelines, mem_verbose)
+
 
             
 def clean_pipelines(pipelines, mem_verbose=False):
