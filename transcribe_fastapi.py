@@ -43,9 +43,9 @@ def load_arguments():
     parser.add_argument("--compute_type", default="float16", type=str,
                         choices=["float16", "float32", "int8"], help="compute type for computation")
 
-    parser.add_argument("--output_dir", "-o", type=str, default=".",
+    parser.add_argument("--output_dir", "-o", type=str, default="None",
                         help="directory to save the outputs")
-    parser.add_argument("--output_format", "-f", type=str, default="all",
+    parser.add_argument("--output_format", "-f", type=str, default="txt",
                         choices=["all", "srt", "vtt", "txt", "tsv", "json", "aud"],
                         help="format of the output file; if not specified, all available formats will be produced")
     parser.add_argument("--verbose", type=str2bool, default=True,
@@ -143,7 +143,8 @@ def load_arguments():
     # If not running as a daemon, require at least one audio file.
     args = vars(parser.parse_args())
     if not args["daemon"] and not args["audio"]:
-        parser.error("At least one audio file must be provided.")
+        print(f"args[daemon]:{args['daemon']}")
+        parser.error("At least one audio file must be provided if not in daemon mode.")
 
     return args
 
