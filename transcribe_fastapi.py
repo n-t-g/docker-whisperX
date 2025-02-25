@@ -21,17 +21,58 @@ from .utils import (
     str2bool,
 )
 
+# transcribe_fastapi.py creates a FastAPI service for the WhisperX transcription pipeline.
+# It provides a RESTful endpoint to transcribe a single audio file, using the same
+# configuration options as the CLI version. The service is designed to handle one
+# transcription request at a time to protect GPU resources. The final result is returned
+# as a [TXT or JSON object depending on --format], rather than writing to a file.
+# The following arguments are not needed:
+# - --audio
+# - --output_dir
+# - --threads
+# - --daemon
+
+# The following arguments can be provided at startup when loading the pipeline:
+# - --verbose
+# - --print_progress
+# - --host
+# - --port
+# - --model
+# - --device
+# - --device_index
+# - --batch_size
+# - --compute_type
+# - --task
+# - --language
+# - --hf_token (Hugging Face Access Token) only for creating the cache. For inference, --model_cache_only is set to True.
+
+# The following arguments can be provided at runtime when calling the /transcribe endpoint:
+# - filename: path to the audio file to transcribe
+# - mem_verbose: enable memory diagnostics
+# - output_format: output format for the transcription [all,srt,vtt,txt,tsv,json,aud], default is txt
+# - min_speakers: minimum number of speakers in the audio file
+# - max_speakers: maximum number of speakers in the audio file
+# - speaker_names: list of speaker names in order of appearance in the audio file, can be incomplete
+
 
 def load_arguments():
+    if torch.cuda.is_available():
+        print("CUDA is available")
+
     # fmt: off
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
-    # audio file(s) to transcribe, required, but only if not running as a daemon.
-    parser.add_argument("audio", nargs="*", default=[], help="audio file(s) to transcribe")
 
-    parser.add_argument("--model", default="small", help="name of the Whisper model to use")
-    parser.add_argument("--model_cache_only", type=str2bool, default=False,
-                        help="If True, will not attempt to download models, instead using cached models from --model_dir")
+    # audio file(s) to transcribe, required, but only if not running as a daemon.
+    # parser.add_argument("audio", nargs="*", default=[], help="audio file(s) to transcribe")
+
+    parser.add_argument("--model", default="large-v2", help="name of the Whisper model to use. Default is 'large-v2'")
+    parser.add_argument("--model_cache_only", type=str2bool, default=True,
+                        help="If True, will not attempt to download models, instead using cached models. Can only be"
+                        + " set to False if --hf_token is provided.")
+    
+    #todo: set some of the needed values as should be...
+    
     parser.add_argument("--model_dir", type=str, default=None,
                         help="the path to save model files; uses ~/.cache/whisper by default")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu",
@@ -140,9 +181,14 @@ def load_arguments():
                         help="Port for the FastAPI server")
     # fmt: on
 
+    # print all arguments for debugging
+    # print("Arguments:")
+    for arg in vars(parser.parse_args()):
+        print(f"       -  {arg}: {vars(parser.parse_args())[arg]}")              
+
     # If not running as a daemon, require at least one audio file.
     args = vars(parser.parse_args())
-    if not args["daemon"] and not args["audio"]:
+    if not args["daemon"] and not args.get("audio",False):
         print(f"args[daemon]:{args['daemon']}")
         parser.error("At least one audio file must be provided if not in daemon mode.")
 
@@ -408,21 +454,25 @@ global_pipelines = load_pipelines(global_args)
 
 @app.post("/transcribe")
 async def transcribe_endpoint(
-    filename: str = Query(..., description="Path to the audio file to transcribe"),
-    mem_verbose: bool = Query(False, description="Enable memory diagnostics")
+    audio_file_path: str = Query(..., description="Path to the audio file to transcribe"),
+    output_format: str = Query("txt", description="Output format for the transcription [all,srt,vtt,txt,tsv,json,aud]"),
+    mem_verbose: bool = Query(False, description="Enable memory diagnostics"),
+    min_speakers: int = Query(None, description="Minimum number of speakers in the audio file"),
+    max_speakers: int = Query(None, description="Maximum number of speakers in the audio file"),
+    speaker_names: list = Query([], description="List of speaker names in order of appearance in the audio file, can be partial"),
 ):
     """
     RESTful endpoint to process a single audio file.
     Only one such call is allowed at a time to protect GPU resources.
-    Instead of writing the output to a file, the final result is returned.
+    Instead of to use in the output writing the output to a file, the final result is returned.
     """
     async with processing_lock:
         try:
             # Run the synchronous process_file() in a thread pool.
-            result = await run_in_threadpool(process_file, filename, global_args, global_pipelines, mem_verbose, True)
+            result = await run_in_threadpool(process_file, audio_file_path, global_args, global_pipelines, mem_verbose, True)
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
-    return {"status": "completed", "filename": filename, "result": result}
+    return {"status": "completed", "filename": audio_file_path, "result": result}
 
 
 @app.on_event("shutdown")
@@ -432,23 +482,36 @@ async def shutdown_event():
 
 # ---------------- CLI Entrypoint ----------------
 
-def cli(args):
-    # Load pipelines (ASR, alignment, diarization) based on CLI arguments.
-    pipelines = load_pipelines(args)
+def cli():
+    args = global_args
+    # Load pipelines (ASR, alignment, diarization) based on CLI arguments: no need to load arguments again.
+    pipelines = global_pipelines
     # Process files sequentially (CLI mode writes output to file).
     process_files(args, pipelines, mem_verbose=False)
     # Final cleanup.
     clean_pipelines(pipelines, mem_verbose=False)
 
 
-if __name__ == "__main__":
-    args = load_arguments()
+def daemon():
+    args = global_args
+    # Load pipelines (ASR, alignment, diarization) based on CLI arguments: no need to load arguments again.
+    pipelines = global_pipelines
+    host = args.pop("host")
+    port = args.pop("port")
+    # Run the FastAPI server.
+    import uvicorn
+    uvicorn.run(app, host=host, port=port)
+    # cleanup is done by the FastAPI shutdown event
+
+def main():
+    args = global_args
     if args.get("daemon", False):
-        # If running as a daemon, start the FastAPI server.
-        host = args.pop("host")
-        port = args.pop("port")
-        import uvicorn
-        uvicorn.run(app, host=host, port=port)
+        print("Running as a daemon...")
+        daemon()
     else:
         # When run as a script, run the CLI version.
-        cli(args)
+        print("Running CLI version...")
+        cli()
+
+if __name__ == "__main__":
+    main()

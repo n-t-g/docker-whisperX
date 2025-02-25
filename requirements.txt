@@ -7,3 +7,4 @@ pandas
 setuptools>=65
 nltk
 fastapi
+uvicorn

@@ -27,8 +27,9 @@ setup(
     + [f"pyannote.audio==3.3.2"],
     entry_points={
         "console_scripts": [
-            "whisperx=whisperx.transcribe_fastapi:cli",
-            "whisperx-classic=whisperx.transcribe:cli"],
+            "whisperx=whisperx.transcribe_fastapi:main",
+            "whisperx-daemon=whisperx.transcribe_fastapi:daemon",
+            "whisperx-cli=whisperx.transcribe:cli"],
     },
     include_package_data=True,
     extras_require={"dev": ["pytest"]},
